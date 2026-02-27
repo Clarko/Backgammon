@@ -121,20 +121,28 @@ final class GameState: ObservableObject {
         message = "Black is thinking…"
 
         Task {
-            try? await Task.sleep(nanoseconds: 600_000_000) // 0.6 s pause for UX
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 s UX pause before showing roll
+
             let rolled = BackgammonEngine.rollDice()
             self.dice = rolled
             self.usedDice = Array(repeating: false, count: rolled.count)
-            self.message = "Black rolled \(self.diceString())"
+            self.message = "Black rolled \(self.diceString()) — computing best move…"
 
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            // Snapshot board so the background task captures a value type, not self.
+            let boardSnapshot = self.board
 
-            let best = BackgammonEngine.chooseBestMove(
-                board: self.board, dice: rolled, isWhite: false)
+            // Run the 2-ply expectimax search on a background thread so the main
+            // actor (and therefore the UI) stays fully responsive during computation.
+            let best = await Task.detached(priority: .userInitiated) {
+                BackgammonEngine.chooseBestMove(board: boardSnapshot, dice: rolled, isWhite: false)
+            }.value
+
+            self.message = "Black plays"
+            try? await Task.sleep(nanoseconds: 300_000_000)
 
             for move in best.moves {
                 self.board = BackgammonEngine.applyMove(move, to: self.board, isWhite: false)
-                try? await Task.sleep(nanoseconds: 400_000_000) // Animate each move
+                try? await Task.sleep(nanoseconds: 420_000_000) // Animate each move
             }
 
             if let result = BackgammonEngine.gameResult(self.board) {
