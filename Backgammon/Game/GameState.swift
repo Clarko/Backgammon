@@ -26,12 +26,21 @@ final class GameState: ObservableObject {
     @Published var validDestinations: Set<Int> = [] // 0-23 or 24 (bear-off)
     @Published var message: String = "White's turn — tap Roll"
     @Published var gameResult: GameResult? = nil
+    /// Set after White completes a turn; drives the coaching sheet in the UI.
+    @Published var coachingAnalysis: BackgammonEngine.MoveAnalysis? = nil
+
+    // Coaching turn context — captured at roll time, used at turn end.
+    private var turnStartBoard = BackgammonBoard.initial
+    private var turnDice: [Int] = []
 
     // MARK: - Player Actions
 
     func rollDice() {
         guard case .rolling = phase else { return }
+        coachingAnalysis = nil          // Clear previous turn's coaching
+        turnStartBoard   = board        // Snapshot position before any moves
         let rolled = BackgammonEngine.rollDice()
+        turnDice = rolled
         dice = rolled
         usedDice = Array(repeating: false, count: rolled.count)
 
@@ -159,6 +168,26 @@ final class GameState: ObservableObject {
     // MARK: - Helpers
 
     private func advanceTurn() {
+        // Analyse White's completed turn in the background, in parallel with
+        // Black starting to think.  We capture value types here so the task
+        // doesn't need to capture self for the heavy computation.
+        if currentPlayer == .white && board != turnStartBoard {
+            let startBoard  = turnStartBoard
+            let endBoard    = board
+            let usedDiceArr = turnDice
+            Task {
+                let analysis = await Task.detached(priority: .userInitiated) {
+                    BackgammonEngine.analyzePlayerTurn(
+                        boardBefore: startBoard,
+                        boardAfter:  endBoard,
+                        dice:        usedDiceArr,
+                        isWhite:     true
+                    )
+                }.value
+                self.coachingAnalysis = analysis
+            }
+        }
+
         currentPlayer = currentPlayer == .white ? .black : .white
         dice = []
         usedDice = []
@@ -227,6 +256,9 @@ final class GameState: ObservableObject {
         selectedPoint = nil
         validDestinations = []
         gameResult = nil
+        coachingAnalysis = nil
+        turnStartBoard = .initial
+        turnDice = []
         message = "White's turn — tap Roll"
     }
 }

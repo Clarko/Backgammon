@@ -472,4 +472,398 @@ enum BackgammonEngine {
         b.points.map(String.init).joined(separator: ",")
         + "|\(b.whiteBar),\(b.blackBar),\(b.whiteOff),\(b.blackOff)"
     }
+
+    // MARK: - Coaching Types
+
+    /// How close the player's move was to the engine's best move.
+    enum MoveQuality {
+        case optimal      // Player chose the best available move
+        case excellent    // Very close to optimal
+        case good         // Reasonable play
+        case inaccuracy   // Noticeably suboptimal
+        case mistake      // Significant error
+        case blunder      // Severe error
+
+        var label: String {
+            switch self {
+            case .optimal:    return "Best move!"
+            case .excellent:  return "Excellent"
+            case .good:       return "Good move"
+            case .inaccuracy: return "Slight inaccuracy"
+            case .mistake:    return "Mistake"
+            case .blunder:    return "Blunder"
+            }
+        }
+
+        /// SwiftUI color name suitable for display.
+        var colorName: String {
+            switch self {
+            case .optimal, .excellent: return "green"
+            case .good:                return "teal"
+            case .inaccuracy:          return "yellow"
+            case .mistake:             return "orange"
+            case .blunder:             return "red"
+            }
+        }
+
+        static func from(scoreDiff: Double) -> MoveQuality {
+            switch scoreDiff {
+            case ..<0.12:  return .optimal
+            case ..<0.30:  return .excellent
+            case ..<0.65:  return .good
+            case ..<1.10:  return .inaccuracy
+            case ..<2.00:  return .mistake
+            default:       return .blunder
+            }
+        }
+    }
+
+    /// A single piece of coaching feedback with an SF Symbol icon, a short
+    /// headline, and a fuller explanation of the underlying concept.
+    struct CoachingTip: Identifiable {
+        enum Category: String {
+            case safety    = "Safety"
+            case tactics   = "Tactics"
+            case pointing  = "Key Points"
+            case priming   = "Priming"
+            case racing    = "Racing"
+            case anchoring = "Anchoring"
+
+            var sfSymbol: String {
+                switch self {
+                case .safety:    return "shield.fill"
+                case .tactics:   return "target"
+                case .pointing:  return "star.fill"
+                case .priming:   return "rectangle.stack.fill"
+                case .racing:    return "hare.fill"
+                case .anchoring: return "anchor"
+                }
+            }
+        }
+
+        let id = UUID()
+        let category: Category
+        let headline: String
+        let explanation: String
+    }
+
+    /// The result of comparing a player's completed turn against the optimal move.
+    struct MoveAnalysis: Identifiable {
+        let id = UUID()
+        let quality: MoveQuality
+        /// How many evaluation points better the optimal move was (0 = optimal).
+        let scoreDiff: Double
+        /// Specific coaching tips, ordered by importance (max 3).
+        let tips: [CoachingTip]
+        /// The board the engine would have reached — nil when player played optimally.
+        let optimalBoard: BackgammonBoard?
+    }
+
+    // MARK: - Player Move Analysis
+
+    /// Compares the board the player reached against what the engine would have
+    /// played, then returns a `MoveAnalysis` with quality rating and targeted tips.
+    ///
+    /// - Parameters:
+    ///   - boardBefore: Position at the start of the player's turn (before any moves).
+    ///   - boardAfter:  Position after all of the player's moves were applied.
+    ///   - dice:        The dice that were rolled for this turn.
+    ///   - isWhite:     `true` when White (the human) just moved.
+    static func analyzePlayerTurn(
+        boardBefore: BackgammonBoard,
+        boardAfter:  BackgammonBoard,
+        dice:        [Int],
+        isWhite:     Bool
+    ) -> MoveAnalysis {
+
+        // If there was only one legal move (or none), the player had no choice.
+        let allSeqs = generateMoves(board: boardBefore, dice: dice, isWhite: isWhite)
+        if allSeqs.count <= 1 {
+            return MoveAnalysis(quality: .optimal, scoreDiff: 0, tips: [], optimalBoard: nil)
+        }
+
+        // Find the engine's best move and apply it to get the optimal board.
+        let optimalSeq = chooseBestMove(board: boardBefore, dice: dice, isWhite: isWhite)
+        var optimalBoard = boardBefore
+        for m in optimalSeq.moves { optimalBoard = applyMove(m, to: optimalBoard, isWhite: isWhite) }
+
+        // If the player reached the same position as the engine, it's optimal.
+        if boardAfter == optimalBoard {
+            return MoveAnalysis(quality: .optimal, scoreDiff: 0, tips: [], optimalBoard: nil)
+        }
+
+        // Score comparison with 1-ply eval (fast; sufficient for coaching context).
+        let playerScore  = evaluate(boardAfter)
+        let optimalScore = evaluate(optimalBoard)
+        // From the player's perspective: positive diff = engine was better.
+        let rawDiff = isWhite ? (optimalScore - playerScore) : (playerScore - optimalScore)
+        let scoreDiff = max(0, rawDiff)
+
+        let quality = MoveQuality.from(scoreDiff: scoreDiff)
+
+        let tips = buildTips(
+            boardBefore:  boardBefore,
+            playerBoard:  boardAfter,
+            optimalBoard: optimalBoard,
+            isWhite:      isWhite,
+            quality:      quality
+        )
+
+        return MoveAnalysis(
+            quality:      quality,
+            scoreDiff:    scoreDiff,
+            tips:         tips,
+            optimalBoard: scoreDiff >= 0.12 ? optimalBoard : nil
+        )
+    }
+
+    // MARK: - Tip Generation
+
+    private static func buildTips(
+        boardBefore:  BackgammonBoard,
+        playerBoard:  BackgammonBoard,
+        optimalBoard: BackgammonBoard,
+        isWhite:      Bool,
+        quality:      MoveQuality
+    ) -> [CoachingTip] {
+
+        var tips: [CoachingTip] = []
+
+        // Tip candidates in priority order: tactical > safety > strategic.
+        let generators: [() -> CoachingTip?] = [
+            { missedHitTip(before: boardBefore, player: playerBoard, optimal: optimalBoard, isWhite: isWhite) },
+            { dangerousBlotTip(before: boardBefore, player: playerBoard, optimal: optimalBoard, isWhite: isWhite) },
+            { missedKeyPointTip(before: boardBefore, player: playerBoard, optimal: optimalBoard, isWhite: isWhite) },
+            { missedPrimeTip(before: boardBefore, player: playerBoard, optimal: optimalBoard, isWhite: isWhite) },
+            { missedAnchorTip(before: boardBefore, player: playerBoard, optimal: optimalBoard, isWhite: isWhite) },
+            { raceEfficiencyTip(player: playerBoard, optimal: optimalBoard, isWhite: isWhite) },
+        ]
+
+        for gen in generators {
+            if tips.count >= 3 { break }
+            if let tip = gen() { tips.append(tip) }
+        }
+
+        // Generic fallback when quality is poor but no specific pattern was found.
+        if tips.isEmpty, quality == .mistake || quality == .blunder {
+            tips.append(CoachingTip(
+                category: .tactics,
+                headline: "Look deeper before committing",
+                explanation: "Before placing your checkers, scan for: hits (highest priority), point-making opportunities, and ways to avoid leaving blots. Doing this in order reveals the strongest play on most rolls."
+            ))
+        }
+
+        return tips
+    }
+
+    // ── Tip: Missed hit ───────────────────────────────────────────────────────
+
+    private static func missedHitTip(
+        before: BackgammonBoard, player: BackgammonBoard,
+        optimal: BackgammonBoard, isWhite: Bool
+    ) -> CoachingTip? {
+
+        let opBarBefore  = isWhite ? before.blackBar  : before.whiteBar
+        let opBarPlayer  = isWhite ? player.blackBar  : player.whiteBar
+        let opBarOptimal = isWhite ? optimal.blackBar : optimal.whiteBar
+
+        // Optimal sent more opponent checkers to the bar than the player did.
+        guard opBarOptimal > opBarPlayer else { return nil }
+
+        // Find the point where the hit occurred in the optimal line.
+        var hitIndex: Int? = nil
+        for i in 0..<24 {
+            let wasOpponentBlot = isWhite ? before.points[i] == -1 : before.points[i] == 1
+            let optimalHit      = isWhite
+                ? (optimal.points[i] > 0 && before.points[i] < 0)
+                : (optimal.points[i] < 0 && before.points[i] > 0)
+            if wasOpponentBlot && optimalHit { hitIndex = i; break }
+        }
+
+        let location = hitIndex.map { pointLabel($0, isWhite: isWhite) } ?? "an exposed checker"
+        return CoachingTip(
+            category: .tactics,
+            headline: "Missed hit on \(location)",
+            explanation: "Your opponent had a blot on \(location). Hitting it sends that checker to the bar, costing your opponent a full turn to re-enter — often the strongest play available, especially in the opening and midgame."
+        )
+    }
+
+    // ── Tip: Dangerous blot ───────────────────────────────────────────────────
+
+    private static func dangerousBlotTip(
+        before: BackgammonBoard, player: BackgammonBoard,
+        optimal: BackgammonBoard, isWhite: Bool
+    ) -> CoachingTip? {
+
+        // Blots the player has that the optimal move avoids.
+        var avoidableBlots: [(index: Int, shots: Int, factor: Double)] = []
+        for i in 0..<24 {
+            let playerHasBlot  = isWhite ? player.points[i] == 1   : player.points[i] == -1
+            let optimalHasBlot = isWhite ? optimal.points[i] == 1  : optimal.points[i] == -1
+            guard playerHasBlot && !optimalHasBlot else { continue }
+            let shots  = directShots(player, at: i, byBlack: isWhite)
+            let factor = blotLocationFactor(i, isWhitePiece: isWhite)
+            avoidableBlots.append((i, shots, factor))
+        }
+
+        guard !avoidableBlots.isEmpty else { return nil }
+
+        // Report the most dangerous avoidable blot.
+        let worst = avoidableBlots.max { a, b in a.factor * Double(a.shots) < b.factor * Double(b.shots) }!
+        let shots = worst.shots
+
+        // Only report if there are actual shots or it's in a very dangerous location.
+        guard shots > 0 || worst.factor > 1.4 else { return nil }
+
+        let pt = pointLabel(worst.index, isWhite: isWhite)
+        let zone: String = worst.factor > 1.4
+            ? "deep in your opponent's home board — very hard to re-enter from the bar"
+            : (worst.factor > 1.1 ? "in the outfield" : "in your outer board")
+        let shotText = shots == 0 ? "no direct shots now, but vulnerable to combination shots"
+                                  : "\(shots) direct shot\(shots == 1 ? "" : "s") against it"
+
+        return CoachingTip(
+            category: .safety,
+            headline: "Avoidable blot on \(pt)",
+            explanation: "You left a checker exposed \(zone) with \(shotText). When a safer play exists, avoiding blots reduces your opponent's opportunities significantly."
+        )
+    }
+
+    // ── Tip: Missed key point ─────────────────────────────────────────────────
+
+    private static func missedKeyPointTip(
+        before: BackgammonBoard, player: BackgammonBoard,
+        optimal: BackgammonBoard, isWhite: Bool
+    ) -> CoachingTip? {
+
+        // Key point indices from this player's perspective, in priority order.
+        // For White: 5-pt=4, bar-pt=6, opponent's 5-pt=19, opponent's 4-pt=18
+        // For Black: 5-pt=19, bar-pt=17, opponent's 5-pt=4, opponent's 4-pt=5
+        let keyPoints: [Int] = isWhite ? [4, 6, 19, 18] : [19, 17, 4, 5]
+
+        for kp in keyPoints {
+            let optimalOwns  = isWhite ? optimal.points[kp] >= 2  : optimal.points[kp] <= -2
+            let playerOwns   = isWhite ? player.points[kp] >= 2   : player.points[kp] <= -2
+            let ownedBefore  = isWhite ? before.points[kp] >= 2   : before.points[kp] <= -2
+            guard optimalOwns && !playerOwns && !ownedBefore else { continue }
+
+            let pt = pointLabel(kp, isWhite: isWhite)
+            let reason: String
+            let relIdx = isWhite ? kp : (23 - kp)
+            switch relIdx {
+            case 4:  reason = "the 5-point is the most prized piece of real estate in backgammon — it anchors your prime and blocks your opponent's key escape route"
+            case 6:  reason = "the bar-point extends your prime toward a complete 6-prime, making it nearly impossible for trapped checkers to escape"
+            case 18: reason = "an anchor in your opponent's home board keeps your back checkers safe and gives you a powerful staging point"
+            case 19: reason = "securing your opponent's 5-point creates a golden anchor — safety, game-winning threats, and pressure all in one"
+            default: reason = "this point strengthens your blockade and restricts your opponent's movement"
+            }
+
+            return CoachingTip(
+                category: .pointing,
+                headline: "Missed making \(pt)",
+                explanation: "You had the checkers to make \(pt) — \(reason). Point-making is generally the second priority after hitting."
+            )
+        }
+        return nil
+    }
+
+    // ── Tip: Missed prime extension ───────────────────────────────────────────
+
+    private static func missedPrimeTip(
+        before: BackgammonBoard, player: BackgammonBoard,
+        optimal: BackgammonBoard, isWhite: Bool
+    ) -> CoachingTip? {
+
+        let beforePrime  = longestPrime(before,  isWhite: isWhite)
+        let playerPrime  = longestPrime(player,  isWhite: isWhite)
+        let optimalPrime = longestPrime(optimal, isWhite: isWhite)
+
+        // Optimal extended the prime and player didn't, and the resulting prime
+        // is at least 4 consecutive points (meaningful).
+        guard optimalPrime > playerPrime,
+              optimalPrime > beforePrime,
+              optimalPrime >= 4 else { return nil }
+
+        let adj = optimalPrime == 6 ? "a full 6-prime — completely unpassable" : "a \(optimalPrime)-point prime"
+        return CoachingTip(
+            category: .priming,
+            headline: "Could have built \(adj)",
+            explanation: "The better move creates \(adj). Any opponent checker trapped behind a 6-prime cannot escape until you break it, giving you complete control of the game's tempo."
+        )
+    }
+
+    // ── Tip: Missed anchor ────────────────────────────────────────────────────
+
+    private static func missedAnchorTip(
+        before: BackgammonBoard, player: BackgammonBoard,
+        optimal: BackgammonBoard, isWhite: Bool
+    ) -> CoachingTip? {
+
+        // Opponent's home board range.
+        let oppHome = isWhite ? 18..<24 : 0..<6
+
+        for i in oppHome {
+            let optimalAnchored = isWhite ? optimal.points[i] >= 2 : optimal.points[i] <= -2
+            let playerAnchored  = isWhite ? player.points[i] >= 2  : player.points[i] <= -2
+            let anchoredBefore  = isWhite ? before.points[i] >= 2  : before.points[i] <= -2
+            guard optimalAnchored && !playerAnchored && !anchoredBefore else { continue }
+
+            let pt = pointLabel(i, isWhite: isWhite)
+            return CoachingTip(
+                category: .anchoring,
+                headline: "Missed anchor on \(pt)",
+                explanation: "Planting two checkers on \(pt) creates a secure anchor deep in enemy territory. Anchors serve a dual purpose: they protect your back runners from being hit, and they give you a re-entry point if your own checker is sent to the bar."
+            )
+        }
+        return nil
+    }
+
+    // ── Tip: Race efficiency ──────────────────────────────────────────────────
+
+    private static func raceEfficiencyTip(
+        player: BackgammonBoard, optimal: BackgammonBoard, isWhite: Bool
+    ) -> CoachingTip? {
+
+        // Only meaningful in a pure race.
+        guard !hasContact(player) && !hasContact(optimal) else { return nil }
+
+        let playerPip  = isWhite ? whitePip(player)  : blackPip(player)
+        let optimalPip = isWhite ? whitePip(optimal) : blackPip(optimal)
+        let diff = playerPip - optimalPip  // positive = player's pip count is higher (worse)
+        guard diff >= 2 else { return nil }
+
+        return CoachingTip(
+            category: .racing,
+            headline: "Race efficiency: \(diff) pips wasted",
+            explanation: "In a pure race the better move leaves you \(diff) fewer pips behind. Race strategy: move your most rearward checkers first (they cost the most if left behind), avoid over-stacking (3+ checkers on one point waste bear-off potential), and use every pip of every die."
+        )
+    }
+
+    // ── Point label helper ────────────────────────────────────────────────────
+    //
+    // Returns a human-readable point name from the given player's perspective.
+    // index 0-23, isWhite=true means White is the player being coached.
+
+    static func pointLabel(_ index: Int, isWhite: Bool) -> String {
+        // White's perspective: point numbers increase from 1 (White's ace-point, index 0)
+        // to 24 (Black's ace-point, index 23).
+        // Black's perspective: point numbers increase from 1 (Black's ace-point, index 23)
+        // to 24 (White's ace-point, index 0).
+        let myPoint = isWhite ? index + 1 : 24 - index  // 1-24 from this player's perspective
+
+        // Special names for historically recognised key points.
+        switch myPoint {
+        case 1:  return "your ace-point"
+        case 5:  return "your 5-point"
+        case 7:  return "your bar-point"
+        case 20: return "your opponent's 5-point"
+        case 19: return "your opponent's 6-point"
+        case 18: return "your opponent's 7-point"
+        case 24: return "your opponent's ace-point"
+        default:
+            if myPoint <= 6  { return "your \(myPoint)-point" }
+            if myPoint >= 19 { return "your opponent's \(25 - myPoint)-point" }
+            return "the \(myPoint)-point"
+        }
+    }
 }

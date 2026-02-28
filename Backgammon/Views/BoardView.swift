@@ -20,6 +20,7 @@ private let bearOffWidth : CGFloat = 50
 
 struct BoardView: View {
     @ObservedObject var gameState: GameState
+    @State private var showingCoach = false
 
     var body: some View {
         GeometryReader { geo in
@@ -44,6 +45,19 @@ struct BoardView: View {
                     controlBar
                         .frame(height: 80)
                 }
+            }
+        }
+        // Show coaching sheet when a new analysis arrives.
+        .onChange(of: gameState.coachingAnalysis?.id) { _ in
+            if gameState.coachingAnalysis != nil { showingCoach = true }
+        }
+        // Auto-dismiss if the player starts a new turn before tapping Done.
+        .onChange(of: gameState.phase) { phase in
+            if case .moving = phase { showingCoach = false }
+        }
+        .sheet(isPresented: $showingCoach) {
+            if let analysis = gameState.coachingAnalysis {
+                CoachingSheetView(analysis: analysis) { showingCoach = false }
             }
         }
     }
@@ -325,11 +339,42 @@ struct BoardView: View {
                 }
             }
 
+            // Coach button — reopen the last analysis if dismissed early
+            if let analysis = gameState.coachingAnalysis, !showingCoach {
+                Button(action: { showingCoach = true }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "lightbulb.fill")
+                        Text(analysis.quality.label)
+                    }
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(coachButtonColor(analysis.quality))
+                    .cornerRadius(8)
+                    .shadow(radius: 3)
+                }
+                .transition(.scale.combined(with: .opacity))
+            }
+
+            Spacer()
+
             // Pip counts
             pipCountView
         }
         .padding(.horizontal, 16)
         .background(Color.black.opacity(0.35))
+        .animation(.easeInOut(duration: 0.2), value: gameState.coachingAnalysis?.id)
+    }
+
+    private func coachButtonColor(_ quality: BackgammonEngine.MoveQuality) -> Color {
+        switch quality {
+        case .optimal, .excellent: return Color(red: 0.13, green: 0.55, blue: 0.13)
+        case .good:                return Color(red: 0.0,  green: 0.45, blue: 0.45)
+        case .inaccuracy:          return Color(red: 0.65, green: 0.50, blue: 0.0)
+        case .mistake:             return Color(red: 0.75, green: 0.35, blue: 0.0)
+        case .blunder:             return Color(red: 0.75, green: 0.10, blue: 0.10)
+        }
     }
 
     private var pipCountView: some View {
