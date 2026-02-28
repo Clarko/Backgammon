@@ -21,6 +21,7 @@ private let bearOffWidth : CGFloat = 50
 struct BoardView: View {
     @ObservedObject var gameState: GameState
     @State private var showingCoach = false
+    @State private var showingDifficulty = false
 
     var body: some View {
         GeometryReader { geo in
@@ -59,6 +60,9 @@ struct BoardView: View {
             if let analysis = gameState.coachingAnalysis {
                 CoachingSheetView(analysis: analysis) { showingCoach = false }
             }
+        }
+        .sheet(isPresented: $showingDifficulty) {
+            DifficultySheetView(gameState: gameState) { showingDifficulty = false }
         }
     }
 
@@ -358,6 +362,21 @@ struct BoardView: View {
             }
 
             Spacer()
+
+            // Difficulty / adaptive AI indicator — tap to open settings.
+            Button(action: { showingDifficulty = true }) {
+                HStack(spacing: 4) {
+                    Image(systemName: gameState.isAdaptiveAI ? "waveform.path.ecg" : "person.fill")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(gameState.isAdaptiveAI ? "Dynamic" : gameState.aiSkillLabel)
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(.white.opacity(0.85))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.12))
+                .cornerRadius(6)
+            }
 
             // Pip counts
             pipCountView

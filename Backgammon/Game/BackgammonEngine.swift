@@ -341,51 +341,92 @@ enum BackgammonEngine {
         }
     }
 
-    // MARK: - 2-Ply Expectimax Move Selection
+    // MARK: - Move Selection (variable skill)
     //
-    // Algorithm:
-    //   1. Generate all legal move sequences for the current dice roll.
-    //   2. Score each with a 1-ply evaluation to rank candidates quickly.
-    //   3. Keep the top-K candidates (avoids evaluating hopeless moves at 2-ply).
-    //   4. For each candidate, compute the *expected* position score by
-    //      considering every one of the 21 possible opponent dice rolls,
-    //      having the opponent pick their best 1-ply response for each roll,
-    //      then probability-weighting and summing those scores.
-    //   5. Return the candidate with the best expected score.
+    // skill ∈ [0, 1] controls strength:
     //
-    // Complexity: K × 21 × (avg opponent moves) evaluations.
-    // With K=16 and ~15 average opponent moves: ~5 000 evals per AI turn — fast.
+    //   1.00 — Expert: deterministic 2-ply expectimax (same as before).
+    //   ≥0.65 — Strong: 2-ply scores the top-K candidates, but the final
+    //            choice is drawn from a softmax distribution (higher temp →
+    //            more likely to pick a sub-optimal move).
+    //   <0.65 — Weak:   Only 1-ply scores are used — simulates an opponent
+    //            who does not look ahead at the opponent's replies.
+    //   ≈0.00 — Novice: flat softmax distribution ≈ random move selection.
+    //
+    // analyzePlayerTurn always calls chooseBestMove without a skill argument
+    // so it defaults to 1.0 and always finds the true reference best move.
 
-    static func chooseBestMove(board: BackgammonBoard, dice: [Int], isWhite: Bool) -> MoveSequence {
+    static func chooseBestMove(board: BackgammonBoard, dice: [Int], isWhite: Bool,
+                               skill: Double = 1.0) -> MoveSequence {
         let seqs = generateMoves(board: board, dice: dice, isWhite: isWhite)
         guard seqs.count > 1 else { return seqs[0] }
 
-        // --- 1-ply ranking ---
-        var oneply: [(seq: MoveSequence, board: BackgammonBoard, score: Double)] = seqs.map { seq in
+        // 1-ply ranking of every candidate.
+        let scored: [(seq: MoveSequence, board: BackgammonBoard, score: Double)] = seqs.map { seq in
             var b = board
             for m in seq.moves { b = applyMove(m, to: b, isWhite: isWhite) }
             return (seq, b, evaluate(b))
+        }.sorted { isWhite ? $0.score > $1.score : $0.score < $1.score }
+
+        let s = min(1.0, max(0.0, skill))
+
+        // Expert path: deterministic 2-ply expectimax.
+        if s >= 0.98 { return expectimaxPick(from: scored, isWhite: isWhite) }
+
+        // Build final candidate list with 2-ply scores at higher skill,
+        // 1-ply scores at lower skill (no lookahead).
+        let candidates: [(seq: MoveSequence, score: Double)]
+        if s >= 0.65 {
+            candidates = scored.prefix(min(scored.count, 16)).map { entry in
+                let score = gameResult(entry.board) != nil
+                    ? entry.score
+                    : expectedOpponentScore(after: entry.board, opponentIsWhite: !isWhite)
+                return (entry.seq, score)
+            }
+        } else {
+            candidates = scored.map { ($0.seq, $0.score) }
         }
-        oneply.sort { isWhite ? $0.score > $1.score : $0.score < $1.score }
 
-        // --- 2-ply expectimax on top-K ---
-        let K = min(oneply.count, 16)
+        // Softmax sample — scores from the current player's perspective (higher = better).
+        let myScores = candidates.map { isWhite ? $0.score : -$0.score }
+        return softmaxSample(items: candidates.map { $0.seq },
+                             scores: myScores,
+                             temperature: temperatureForSkill(s))
+    }
+
+    // Deterministic 2-ply pick (the original expert algorithm).
+    private static func expectimaxPick(
+        from scored: [(seq: MoveSequence, board: BackgammonBoard, score: Double)],
+        isWhite: Bool
+    ) -> MoveSequence {
+        let K = min(scored.count, 16)
         var bestScore = isWhite ? -Double.infinity : Double.infinity
-        var best = oneply[0].seq
-
-        for entry in oneply.prefix(K) {
-            // If the game ends after this move, its 1-ply score is exact.
-            let s: Double
-            if gameResult(entry.board) != nil {
-                s = entry.score
-            } else {
-                s = expectedOpponentScore(after: entry.board, opponentIsWhite: !isWhite)
-            }
-            if isWhite ? (s > bestScore) : (s < bestScore) {
-                bestScore = s; best = entry.seq
-            }
+        var best = scored[0].seq
+        for entry in scored.prefix(K) {
+            let s = gameResult(entry.board) != nil
+                ? entry.score
+                : expectedOpponentScore(after: entry.board, opponentIsWhite: !isWhite)
+            if isWhite ? (s > bestScore) : (s < bestScore) { bestScore = s; best = entry.seq }
         }
         return best
+    }
+
+    /// Softmax temperature for a given skill level.
+    /// skill=0 → ≈8.2 (near-random); skill=0.5 → ≈3.0; skill=0.9 → ≈0.45 (decisive).
+    static func temperatureForSkill(_ skill: Double) -> Double {
+        0.2 + 8.0 * pow(1.0 - skill, 1.5)
+    }
+
+    /// Draws one item from a softmax distribution over `scores`.
+    private static func softmaxSample(items: [MoveSequence], scores: [Double],
+                                      temperature: Double) -> MoveSequence {
+        guard items.count > 1 else { return items[0] }
+        let maxScore = scores.max()!
+        let expScores = scores.map { exp(($0 - maxScore) / temperature) }
+        let total = expScores.reduce(0.0, +)
+        var r = Double.random(in: 0..<total)
+        for (item, e) in zip(items, expScores) { r -= e; if r <= 0 { return item } }
+        return items.last!
     }
 
     /// Averages the opponent's best 1-ply response across all 21 dice rolls.
