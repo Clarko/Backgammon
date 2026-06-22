@@ -1,60 +1,73 @@
+// BoardView.swift
+// Full backgammon board rendered in SwiftUI.
+//
+// Layout (White = cream circles, Black = dark circles):
+//   TOP ROW    (points 13-18, then 19-24)  — checkers hang downward
+//   BOTTOM ROW (points 12-7,  then  6-1)   — checkers hang upward
+//   Bar splits each half. Bear-off trays on the right.
+
 import SwiftUI
 
-// MARK: - Layout constants computed from available size
+// MARK: - Responsive layout
+
+private let boardPad: CGFloat = 8
 
 struct BoardLayout {
-    let pointWidth: CGFloat
+    let pointWidth:  CGFloat
     let checkerSize: CGFloat
-    let barWidth: CGFloat
+    let barWidth:    CGFloat
     let bearOffWidth: CGFloat
-    let boardHeight: CGFloat
 
-    init(availableWidth: CGFloat, availableHeight: CGFloat) {
-        bearOffWidth  = max(34, availableWidth * 0.072)
-        // Total board area (12 points + bar) within padding
-        let boardArea = availableWidth - bearOffWidth - 16   // 8pt each side
-        barWidth      = max(24, boardArea * 0.055)
-        pointWidth    = (boardArea - barWidth) / 12
-        checkerSize   = min(pointWidth * 0.86, 38)
-        boardHeight   = availableHeight
+    init(availableWidth: CGFloat) {
+        let usable   = availableWidth - boardPad * 2
+        bearOffWidth = max(44, usable * 0.07)
+        let boardW   = usable - bearOffWidth
+        barWidth     = max(26, boardW * 0.055)
+        pointWidth   = (boardW - barWidth) / 12
+        checkerSize  = min(pointWidth * 0.82, 36)
     }
 }
 
-// MARK: - BoardView
+// MARK: - Main Board View
 
 struct BoardView: View {
     @ObservedObject var gameState: GameState
     @State private var showingCoach = false
     @State private var showingDifficulty = false
 
-    private let statusH:  CGFloat = 54
-    private let controlH: CGFloat = 96
-
     var body: some View {
         GeometryReader { geo in
-            let boardAvailH = geo.size.height - statusH - controlH
-            let layout = BoardLayout(availableWidth: geo.size.width,
-                                     availableHeight: boardAvailH)
+            let layout = BoardLayout(availableWidth: geo.size.width)
             ZStack {
-                Color(red: 0.15, green: 0.45, blue: 0.25).ignoresSafeArea()
+                // Felt background
+                Color(red: 0.15, green: 0.45, blue: 0.25)
+                    .ignoresSafeArea()
+
                 VStack(spacing: 0) {
-                    statusBar
-                        .frame(height: statusH)
-                    HStack(alignment: .top, spacing: 0) {
-                        fullBoard(layout: layout)
+                    // Status bar
+                    statusBar(layout: layout)
+                        .frame(height: 50)
+
+                    // Board area
+                    HStack(spacing: 0) {
+                        boardBody(layout: layout)
                         bearOffTray(layout: layout)
                     }
-                    .padding(.horizontal, 8)
-                    controlBar
-                        .frame(height: controlH)
+                    .padding(.horizontal, boardPad)
+
+                    // Control bar
+                    controlBar(layout: layout)
+                        .frame(height: 80)
                 }
             }
         }
+        // Show coaching sheet when a new analysis arrives.
         .onChange(of: gameState.coachingAnalysis?.id) { _ in
             if gameState.coachingAnalysis != nil { showingCoach = true }
         }
+        // Auto-dismiss if the player starts a new turn before tapping Done.
         .onChange(of: gameState.phase) { phase in
-            if phase == .moving { showingCoach = false }
+            if case .moving = phase { showingCoach = false }
         }
         .sheet(isPresented: $showingCoach) {
             if let analysis = gameState.coachingAnalysis {
@@ -66,259 +79,16 @@ struct BoardView: View {
         }
     }
 
-    // MARK: Full board (left 6 | bar | right 6)
+    // MARK: - Status Bar
 
-    @ViewBuilder
-    private func fullBoard(layout: BoardLayout) -> some View {
-        let halfH = layout.boardHeight / 2
-        ZStack {
-            // Wood background
-            Color(red: 0.55, green: 0.27, blue: 0.07)
-
-            VStack(spacing: 0) {
-                // Top row of points: indices 12..23 left-to-right (black's home → white's outer)
-                HStack(spacing: 0) {
-                    // Left 6: indices 12-17
-                    ForEach(12..<18, id: \.self) { i in
-                        pointView(index: i, isTop: true, layout: layout)
-                            .frame(width: layout.pointWidth, height: halfH)
-                    }
-                    // Bar (top)
-                    barHalf(isTop: true, layout: layout)
-                        .frame(width: layout.barWidth, height: halfH)
-                    // Right 6: indices 18-23
-                    ForEach(18..<24, id: \.self) { i in
-                        pointView(index: i, isTop: true, layout: layout)
-                            .frame(width: layout.pointWidth, height: halfH)
-                    }
-                }
-                .frame(height: halfH)
-
-                // Centre divider
-                Rectangle()
-                    .fill(Color.black.opacity(0.25))
-                    .frame(height: 2)
-
-                // Bottom row: indices 11..0 left-to-right
-                HStack(spacing: 0) {
-                    ForEach((6..<12).reversed(), id: \.self) { i in
-                        pointView(index: i, isTop: false, layout: layout)
-                            .frame(width: layout.pointWidth, height: halfH)
-                    }
-                    barHalf(isTop: false, layout: layout)
-                        .frame(width: layout.barWidth, height: halfH)
-                    ForEach((0..<6).reversed(), id: \.self) { i in
-                        pointView(index: i, isTop: false, layout: layout)
-                            .frame(width: layout.pointWidth, height: halfH)
-                    }
-                }
-                .frame(height: halfH)
-            }
-        }
-        .frame(width: layout.pointWidth * 12 + layout.barWidth, height: layout.boardHeight)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    // MARK: Point view
-
-    @ViewBuilder
-    private func pointView(index: Int, isTop: Bool, layout: BoardLayout) -> some View {
-        let isHighlighted = gameState.validDestinations.contains(index)
-        let isSelected    = gameState.selectedPoint == index
-        let count         = gameState.pendingBoard.points[index]
-        let isWhiteChecker = count > 0
-        let absCount      = abs(count)
-
-        ZStack {
-            // Triangle
-            TriangleShape(pointingDown: isTop)
-                .fill(isHighlighted ? Color.yellow : triangleColor(index: index))
-                .opacity(isHighlighted ? 0.85 : 1.0)
-
-            // Checkers
-            let maxVis  = 5
-            let dispCnt = min(absCount, maxVis)
-            let shrink  = absCount > maxVis
-            let sz      = shrink ? layout.checkerSize * 0.76 : layout.checkerSize
-
-            if isTop {
-                VStack(spacing: 1) {
-                    ForEach(0..<dispCnt, id: \.self) { i in
-                        checkerView(isWhite: isWhiteChecker, size: sz,
-                                    showLabel: shrink && i == dispCnt - 1,
-                                    label: "\(absCount)")
-                    }
-                    Spacer(minLength: 0)
-                }
-            } else {
-                VStack(spacing: 1) {
-                    Spacer(minLength: 0)
-                    ForEach(0..<dispCnt, id: \.self) { i in
-                        checkerView(isWhite: isWhiteChecker, size: sz,
-                                    showLabel: shrink && i == 0,
-                                    label: "\(absCount)")
-                    }
-                }
-            }
-
-            // Selected highlight
-            if isSelected {
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color.yellow, lineWidth: 3)
-            }
-
-            // Destination indicator (when no checker there yet)
-            if isHighlighted && absCount == 0 {
-                Circle()
-                    .fill(Color.yellow.opacity(0.6))
-                    .frame(width: layout.checkerSize * 0.42, height: layout.checkerSize * 0.42)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { handleTap(index: index) }
-    }
-
-    @ViewBuilder
-    private func checkerView(isWhite: Bool, size: CGFloat, showLabel: Bool, label: String) -> some View {
-        ZStack {
-            Circle()
-                .fill(isWhite ? Color.white : Color.black)
-                .frame(width: size, height: size)
-            Circle()
-                .stroke(isWhite ? Color.gray.opacity(0.6) : Color.white.opacity(0.25), lineWidth: 1.5)
-                .frame(width: size, height: size)
-            if showLabel {
-                Text(label)
-                    .font(.system(size: size * 0.36, weight: .bold))
-                    .foregroundColor(isWhite ? .black : .white)
-            }
-        }
-    }
-
-    // MARK: Bar halves
-
-    @ViewBuilder
-    private func barHalf(isTop: Bool, layout: BoardLayout) -> some View {
-        let board = gameState.pendingBoard
-        let count = isTop ? board.blackBar : board.whiteBar
-        let isWhite = !isTop
-
-        ZStack {
-            Color(red: 0.32, green: 0.14, blue: 0.03)
-            VStack(spacing: 2) {
-                if !isTop { Spacer() }
-                ForEach(0..<min(count, 4), id: \.self) { _ in
-                    checkerView(isWhite: isWhite, size: layout.checkerSize * 0.78,
-                                showLabel: false, label: "")
-                }
-                if count > 4 {
-                    Text("+\(count - 4)")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.white)
-                }
-                if isTop { Spacer() }
-            }
-            .padding(.vertical, 4)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if gameState.phase == .moving && !isTop && board.whiteBar > 0 {
-                gameState.selectPoint(24)
-            }
-        }
-    }
-
-    // MARK: Bear-off tray
-
-    @ViewBuilder
-    private func bearOffTray(layout: BoardLayout) -> some View {
-        let halfH = layout.boardHeight / 2
-        VStack(spacing: 0) {
-            // AI (black) borne off
-            VStack(spacing: 4) {
-                Text("AI")
-                    .font(.caption2).foregroundColor(.white).opacity(0.6)
-                Text("\(gameState.board.blackOff)")
-                    .font(.title3.bold()).foregroundColor(.white)
-                Spacer()
-            }
-            .frame(height: halfH)
-
-            // Player (white) borne off
-            VStack(spacing: 4) {
-                Spacer()
-                Text("\(gameState.board.whiteOff)")
-                    .font(.title3.bold()).foregroundColor(.white)
-                Text("You")
-                    .font(.caption2).foregroundColor(.white).opacity(0.6)
-            }
-            .frame(height: halfH)
-        }
-        .frame(width: layout.bearOffWidth, height: layout.boardHeight)
-        .background(Color(red: 0.10, green: 0.32, blue: 0.16))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-
-    // MARK: Status bar
-
-    @ViewBuilder
-    private var statusBar: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("You: \(pipCount(isWhite: true))").font(.caption2)
-                Text("AI: \(pipCount(isWhite: false))").font(.caption2)
-            }
-            .foregroundColor(.white)
-            .opacity(0.75)
-            .frame(width: 72, alignment: .leading)
-
-            Spacer()
-
+    private func statusBar(layout: BoardLayout) -> some View {
+        HStack {
             Text(gameState.message)
-                .font(.caption.bold())
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
-                .lineLimit(2)
-
+                .padding(.horizontal, 12)
             Spacer()
-
-            HStack(spacing: 10) {
-                if let analysis = gameState.coachingAnalysis {
-                    Button {
-                        showingCoach = true
-                    } label: {
-                        Text(analysis.quality.label)
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(qualityColor(analysis.quality))
-                            .foregroundColor(.white)
-                            .cornerRadius(7)
-                    }
-                }
-                Button {
-                    showingDifficulty = true
-                } label: {
-                    VStack(spacing: 1) {
-                        Image(systemName: "gearshape.fill").font(.caption)
-                        Text(gameState.isAdaptiveAI ? "Dynamic" : gameState.aiSkillLabel)
-                            .font(.system(size: 9))
-                    }
-                    .foregroundColor(.white)
-                    .opacity(0.8)
-                }
-            }
-            .frame(width: 90, alignment: .trailing)
-        }
-        .padding(.horizontal, 12)
-        .background(Color.black.opacity(0.2))
-    }
-
-    // MARK: Control bar
-
-    @ViewBuilder
-    private var controlBar: some View {
-        VStack(spacing: 6) {
-            // Dice display
             if !gameState.dice.isEmpty {
                 DiceRowView(
                     dice: gameState.dice,
@@ -327,135 +97,421 @@ struct BoardView: View {
                     selectedDieIndex: gameState.selectedDieIndex,
                     onDieTap: { i in gameState.selectDie(i) }
                 )
+                .padding(.trailing, 12)
+            }
+        }
+        .background(Color.black.opacity(0.30))
+    }
+
+    // MARK: - Board Body
+
+    private func boardBody(layout: BoardLayout) -> some View {
+        GeometryReader { geo in
+            let h = geo.size.height
+
+            ZStack(alignment: .top) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(red: 0.55, green: 0.27, blue: 0.07))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color(red: 0.35, green: 0.18, blue: 0.04), lineWidth: 3)
+                    )
+
+                HStack(spacing: 0) {
+                    halfBoard(topPoints: Array(12...17),
+                              bottomPoints: Array(stride(from: 11, through: 6, by: -1)),
+                              height: h, layout: layout)
+
+                    barColumn(height: h, layout: layout)
+
+                    halfBoard(topPoints: Array(18...23),
+                              bottomPoints: Array(stride(from: 5, through: 0, by: -1)),
+                              height: h, layout: layout)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+        }
+    }
+
+    private func halfBoard(topPoints: [Int], bottomPoints: [Int],
+                           height: CGFloat, layout: BoardLayout) -> some View {
+        HStack(spacing: 0) {
+            ForEach(topPoints.indices, id: \.self) { col in
+                let topIdx = topPoints[col]
+                let botIdx = bottomPoints[col]
+                let isEven = col % 2 == 0
+
+                ZStack(alignment: .top) {
+                    VStack(spacing: 0) {
+                        TriangleShape(pointingDown: false)
+                            .fill(isEven
+                                  ? Color(red: 0.75, green: 0.12, blue: 0.12)
+                                  : Color(red: 0.92, green: 0.80, blue: 0.55))
+                            .frame(height: height / 2)
+                        TriangleShape(pointingDown: true)
+                            .fill(isEven
+                                  ? Color(red: 0.92, green: 0.80, blue: 0.55)
+                                  : Color(red: 0.75, green: 0.12, blue: 0.12))
+                            .frame(height: height / 2)
+                    }
+
+                    pointColumn(index: topIdx, fromTop: true,  height: height / 2, layout: layout)
+                        .frame(height: height / 2)
+                        .frame(maxHeight: .infinity, alignment: .top)
+
+                    pointColumn(index: botIdx, fromTop: false, height: height / 2, layout: layout)
+                        .frame(height: height / 2)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+
+                    VStack {
+                        pointLabel(topIdx + 1)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                        pointLabel(botIdx + 1)
+                            .frame(maxHeight: .infinity, alignment: .bottom)
+                    }
+                }
+                .frame(width: layout.pointWidth)
+                .contentShape(Rectangle())
+                .onTapGesture { handleTap(index: topIdx, otherIndex: botIdx) }
+            }
+        }
+    }
+
+    private func handleTap(index: Int, otherIndex: Int) {
+        guard case .moving = gameState.phase else { return }
+        let isWhite = gameState.currentPlayer == .white
+        let board   = gameState.pendingBoard
+
+        if gameState.inputMode == .diceFirst {
+            // In dice-first mode: tap destination, die already selected (or auto-pick)
+            for idx in [index, otherIndex] {
+                if gameState.validDestinations.contains(idx) {
+                    gameState.selectDestWithDie(idx)
+                    return
+                }
+            }
+        } else {
+            // Checker-first: valid destination > own checker > deselect
+            for idx in [index, otherIndex] {
+                if gameState.validDestinations.contains(idx) {
+                    gameState.selectPoint(idx)
+                    return
+                }
+            }
+            for idx in [index, otherIndex] {
+                let has = isWhite ? board.points[idx] > 0 : board.points[idx] < 0
+                if has { gameState.selectPoint(idx); return }
+            }
+        }
+    }
+
+    // MARK: - Single Point Column
+
+    private func pointColumn(index: Int, fromTop: Bool, height: CGFloat, layout: BoardLayout) -> some View {
+        let count       = abs(gameState.pendingBoard.points[index])
+        let isWhite     = gameState.pendingBoard.points[index] > 0
+        let isSelected  = gameState.selectedPoint == index
+        let isValidDest = gameState.validDestinations.contains(index)
+        let maxVisible  = min(count, 5)
+
+        return ZStack(alignment: fromTop ? .top : .bottom) {
+            if isSelected || isValidDest {
+                Rectangle()
+                    .fill(isSelected
+                          ? Color.yellow.opacity(0.35)
+                          : Color.green.opacity(0.25))
             }
 
-            // Action buttons
-            HStack(spacing: 12) {
-                switch gameState.phase {
-                case .rolling:
-                    rollButton
-                case .moving:
-                    undoButton
-                    doneButton
-                case .aiTurn:
-                    Text("AI thinking…")
-                        .font(.headline)
+            VStack(spacing: 1) {
+                let checkers = fromTop
+                    ? Array((0..<maxVisible))
+                    : Array((0..<maxVisible).reversed())
+
+                ForEach(checkers, id: \.self) { i in
+                    checkerView(isWhite: isWhite, isSelected: isSelected && i == 0,
+                                size: layout.checkerSize)
+                }
+                if count > 5 {
+                    Text("+\(count - 5)")
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.white)
-                        .opacity(0.65)
-                case .gameOver:
-                    newGameButton(primary: true)
-                }
-
-                if gameState.phase == .rolling || gameState.phase == .moving {
-                    newGameButton(primary: false)
                 }
             }
+            .padding(.vertical, 2)
+        }
+        .onTapGesture { gameState.selectPoint(index) }
+    }
+
+    // MARK: - Bar Column
+
+    private func barColumn(height: CGFloat, layout: BoardLayout) -> some View {
+        let board = gameState.pendingBoard
+        let wBar  = board.whiteBar
+        let bBar  = board.blackBar
+        let isWhiteTurn = gameState.currentPlayer == .white
+
+        return ZStack {
+            Color(red: 0.50, green: 0.25, blue: 0.05)
+
+            VStack(spacing: 4) {
+                VStack(spacing: 1) {
+                    ForEach(0..<min(bBar, 4), id: \.self) { _ in
+                        checkerView(isWhite: false, isSelected: false, size: layout.checkerSize * 0.85)
+                    }
+                    if bBar > 4 { Text("+\(bBar-4)").font(.system(size: 9, weight: .bold)).foregroundColor(.white) }
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture { if !isWhiteTurn { gameState.selectPoint(24) } }
+
+                Divider().background(Color.white.opacity(0.4))
+                Text("BAR").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.6))
+                Divider().background(Color.white.opacity(0.4))
+
+                VStack(spacing: 1) {
+                    ForEach(0..<min(wBar, 4), id: \.self) { _ in
+                        checkerView(isWhite: true, isSelected: false, size: layout.checkerSize * 0.85)
+                    }
+                    if wBar > 4 { Text("+\(wBar-4)").font(.system(size: 9, weight: .bold)).foregroundColor(.white) }
+                }
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if isWhiteTurn && gameState.inputMode == .checkerFirst {
+                        gameState.selectPoint(24)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .frame(width: layout.barWidth)
+    }
+
+    // MARK: - Bear-off Tray
+
+    private func bearOffTray(layout: BoardLayout) -> some View {
+        let board = gameState.pendingBoard
+        let miniSize = layout.checkerSize * 0.62
+
+        return ZStack {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color(red: 0.40, green: 0.20, blue: 0.04))
+
+            VStack(spacing: 6) {
+                VStack(spacing: 2) {
+                    Text("BLACK").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.7))
+                    Text("\(board.blackOff)").font(.system(size: 22, weight: .bold)).foregroundColor(.white)
+                    ForEach(0..<min(board.blackOff, 6), id: \.self) { _ in
+                        checkerView(isWhite: false, isSelected: false, size: miniSize)
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+
+                Divider().background(Color.white.opacity(0.3))
+
+                VStack(spacing: 2) {
+                    Text("WHITE").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.7))
+                    Text("\(board.whiteOff)").font(.system(size: 22, weight: .bold)).foregroundColor(.white)
+                    ForEach(0..<min(board.whiteOff, 6), id: \.self) { _ in
+                        checkerView(isWhite: true, isSelected: false, size: miniSize)
+                    }
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+            }
+            .padding(6)
+        }
+        .frame(width: layout.bearOffWidth)
+    }
+
+    // MARK: - Control Bar
+
+    private func controlBar(layout: BoardLayout) -> some View {
+        HStack(spacing: 12) {
+            // Roll button
+            if case .rolling = gameState.phase {
+                Button(action: { gameState.rollDice() }) {
+                    Text("Roll Dice")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 10)
+                        .background(Color(red: 0.18, green: 0.55, blue: 0.34))
+                        .cornerRadius(10)
+                        .shadow(radius: 4)
+                }
+            }
+
+            // Undo / Done (moving phase)
+            if case .moving = gameState.phase {
+                Button(action: { gameState.undoLastMove() }) {
+                    Text("Undo")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(gameState.canUndo ? Color.orange : Color.gray.opacity(0.4))
+                        .cornerRadius(10)
+                }
+                .disabled(!gameState.canUndo)
+
+                Button(action: { gameState.commitMoves() }) {
+                    Text("Done")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(gameState.canCommit ? Color.green : Color.gray.opacity(0.4))
+                        .cornerRadius(10)
+                }
+                .disabled(!gameState.canCommit)
+            }
+
+            // New Game (game over)
+            if case .gameOver(_) = gameState.phase {
+                Button(action: { gameState.newGame() }) {
+                    Text("New Game")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 10)
+                        .background(Color.blue)
+                        .cornerRadius(10)
+                        .shadow(radius: 4)
+                }
+            }
+
+            // Coach button
+            if let analysis = gameState.coachingAnalysis, !showingCoach {
+                Button(action: { showingCoach = true }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "lightbulb.fill")
+                        Text(analysis.quality.label)
+                    }
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(coachButtonColor(analysis.quality))
+                    .cornerRadius(8)
+                    .shadow(radius: 3)
+                }
+                .transition(.scale.combined(with: .opacity))
+            }
+
+            Spacer()
+
+            Button(action: { showingDifficulty = true }) {
+                HStack(spacing: 4) {
+                    Image(systemName: gameState.isAdaptiveAI ? "waveform.path.ecg" : "person.fill")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(gameState.isAdaptiveAI ? "Dynamic" : gameState.aiSkillLabel)
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(.white.opacity(0.85))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.12))
+                .cornerRadius(6)
+            }
+
+            pipCountView
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.28))
+        .background(Color.black.opacity(0.35))
+        .animation(.easeInOut(duration: 0.2), value: gameState.coachingAnalysis?.id)
     }
 
-    private var rollButton: some View {
-        Button("Roll Dice") { gameState.rollDice() }
-            .buttonStyle(ActionButtonStyle(color: .blue))
-    }
-
-    private var undoButton: some View {
-        Button("Undo") { gameState.undoLastMove() }
-            .buttonStyle(ActionButtonStyle(color: .orange))
-            .disabled(!gameState.canUndo)
-            .opacity(gameState.canUndo ? 1 : 0.35)
-    }
-
-    private var doneButton: some View {
-        Button("Done") { gameState.commitMoves() }
-            .buttonStyle(ActionButtonStyle(color: .green))
-            .disabled(!gameState.canCommit)
-            .opacity(gameState.canCommit ? 1 : 0.45)
-    }
-
-    private func newGameButton(primary: Bool) -> some View {
-        Button("New Game") { gameState.newGame() }
-            .buttonStyle(ActionButtonStyle(color: primary ? .blue : Color(white: 1.0, opacity: 0.15)))
-    }
-
-    // MARK: Tap handling
-
-    private func handleTap(index: Int) {
-        guard gameState.phase == .moving else { return }
-        if gameState.inputMode == .checkerFirst {
-            gameState.tapPoint(index)
-        } else {
-            gameState.selectDestinationWithDie(index)
+    private func coachButtonColor(_ quality: BackgammonEngine.MoveQuality) -> Color {
+        switch quality {
+        case .optimal, .excellent: return Color(red: 0.13, green: 0.55, blue: 0.13)
+        case .good:                return Color(red: 0.0,  green: 0.45, blue: 0.45)
+        case .inaccuracy:          return Color(red: 0.65, green: 0.50, blue: 0.0)
+        case .mistake:             return Color(red: 0.75, green: 0.35, blue: 0.0)
+        case .blunder:             return Color(red: 0.75, green: 0.10, blue: 0.10)
         }
     }
 
-    // MARK: Helpers
-
-    private func triangleColor(index: Int) -> Color {
-        index % 2 == 0
-            ? Color(red: 0.78, green: 0.20, blue: 0.20)
-            : Color(red: 0.90, green: 0.85, blue: 0.68)
-    }
-
-    private func qualityColor(_ q: MoveQuality) -> Color {
-        switch q.colorName {
-        case "green":  return .green
-        case "mint":   return .mint
-        case "blue":   return .blue
-        case "yellow": return Color(red: 0.65, green: 0.65, blue: 0)
-        case "orange": return .orange
-        case "red":    return .red
-        default:       return .gray
+    private var pipCountView: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            pipLabel(label: "White pip:", value: whitePip())
+            pipLabel(label: "Black pip:", value: blackPip())
         }
     }
 
-    private func pipCount(isWhite: Bool) -> Int {
-        var pip = 0
+    private func pipLabel(label: String, value: Int) -> some View {
+        HStack(spacing: 4) {
+            Text(label).font(.system(size: 11)).foregroundColor(.white.opacity(0.7))
+            Text("\(value)").font(.system(size: 11, weight: .bold)).foregroundColor(.white)
+        }
+    }
+
+    // MARK: - Checker View
+
+    private func checkerView(isWhite: Bool, isSelected: Bool, size: CGFloat) -> some View {
+        ZStack {
+            Circle()
+                .fill(isWhite
+                      ? Color(red: 0.95, green: 0.90, blue: 0.80)
+                      : Color(red: 0.15, green: 0.10, blue: 0.10))
+                .shadow(color: .black.opacity(0.4), radius: 1, x: 0, y: 1)
+
+            Circle()
+                .stroke(isSelected
+                        ? Color.yellow
+                        : (isWhite ? Color(red: 0.7, green: 0.6, blue: 0.4)
+                                   : Color(red: 0.4, green: 0.3, blue: 0.3)),
+                        lineWidth: isSelected ? 2.5 : 1)
+
+            if isSelected {
+                Circle().fill(Color.yellow.opacity(0.3))
+            }
+        }
+        .frame(width: size, height: size)
+    }
+
+    // MARK: - Point Number Label
+
+    private func pointLabel(_ n: Int) -> some View {
+        Text("\(n)")
+            .font(.system(size: 8, weight: .medium))
+            .foregroundColor(.white.opacity(0.55))
+            .padding(1)
+    }
+
+    // MARK: - Pip Count Helpers
+
+    private func whitePip() -> Int {
         let b = gameState.board
-        for i in 0..<24 {
-            if isWhite && b.points[i] > 0 { pip += b.points[i] * (i + 1) }
-            if !isWhite && b.points[i] < 0 { pip += (-b.points[i]) * (24 - i) }
-        }
-        if isWhite  { pip += b.whiteBar * 25 }
-        else        { pip += b.blackBar * 25 }
-        return pip
+        var p = b.whiteBar * 25
+        for i in 0..<24 where b.points[i] > 0 { p += b.points[i] * (i + 1) }
+        return p
     }
-}
 
-// MARK: - Triangle shape
-
-struct TriangleShape: Shape {
-    let pointingDown: Bool
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        if pointingDown {
-            p.move(to: CGPoint(x: rect.minX, y: rect.minY))
-            p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-            p.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
-        } else {
-            p.move(to: CGPoint(x: rect.midX, y: rect.minY))
-            p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-            p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        }
-        p.closeSubpath()
+    private func blackPip() -> Int {
+        let b = gameState.board
+        var p = b.blackBar * 25
+        for i in 0..<24 where b.points[i] < 0 { p += (-b.points[i]) * (24 - i) }
         return p
     }
 }
 
-// MARK: - Button style
+// MARK: - Triangle Shape
 
-struct ActionButtonStyle: ButtonStyle {
-    let color: Color
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline)
-            .foregroundColor(.white)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 10)
-            .background(color)
-            .cornerRadius(10)
-            .opacity(configuration.isPressed ? 0.65 : 1.0)
+struct TriangleShape: Shape {
+    let pointingDown: Bool
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        if pointingDown {
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        } else {
+            path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        }
+        path.closeSubpath()
+        return path
     }
 }

@@ -1,300 +1,401 @@
+// GameState.swift
+// Observable game state manager connecting the engine to the SwiftUI views.
+
 import Foundation
-import SwiftUI
+import Combine
 
-// MARK: - Enums
-
-enum Player { case white, black }
-
-enum GamePhase: Equatable {
-    case rolling
-    case moving
-    case aiTurn
-    case gameOver
-}
-
-enum GameResult: Equatable {
-    case win(isGammon: Bool, isBackgammon: Bool)
-    case loss(isGammon: Bool, isBackgammon: Bool)
+enum GamePhase {
+    case initial          // Waiting for first roll to determine who goes first
+    case rolling          // Player needs to roll
+    case moving           // Player is selecting / making moves
+    case aiTurn           // AI is computing / animating its turn
+    case gameOver(GameResult)
 }
 
 enum InputMode: String, CaseIterable {
     case checkerFirst = "checker"
     case diceFirst    = "dice"
     var label: String {
-        switch self {
-        case .checkerFirst: return "Checker-first"
-        case .diceFirst:    return "Dice-first"
-        }
+        self == .checkerFirst ? "Checker-first" : "Dice-first"
     }
 }
-
-// MARK: - GameState
 
 @MainActor
 final class GameState: ObservableObject {
 
-    // Board and turn
+    // MARK: - Published state
+
     @Published var board = BackgammonBoard.initial
-    @Published var currentPlayer: Player = .white
+    @Published var currentPlayer: Player = .white   // White always goes first for simplicity
     @Published var phase: GamePhase = .rolling
     @Published var dice: [Int] = []
-    @Published var usedDice: [Bool] = []
-
-    // Pending (staged) move state — pairs of (move, dieIndex used)
-    @Published var pendingBoard = BackgammonBoard.initial
-    @Published private(set) var pendingMoves: [(CheckerMove, Int)] = []
-
-    // Selection state
-    @Published var selectedPoint: Int?       // checker-first: selected source point (24 = bar)
-    @Published var selectedDieIndex: Int?    // dice-first: which die slot is active
-    @Published var validDestinations: Set<Int> = []
-
-    // UI
-    @Published var message: String = "Roll to start!"
+    @Published var usedDice: [Bool] = []            // Tracks which dice slots are consumed
+    @Published var selectedPoint: Int? = nil        // checker-first: selected source (0-23 or 24=bar)
+    @Published var selectedDieIndex: Int? = nil     // dice-first: selected die slot
+    @Published var validDestinations: Set<Int> = [] // 0-23 or 24 (bear-off)
+    @Published var message: String = "White's turn — tap Roll"
     @Published var gameResult: GameResult? = nil
+    /// Set after White completes a turn; drives the coaching sheet in the UI.
     @Published var coachingAnalysis: BackgammonEngine.MoveAnalysis? = nil
 
-    // AI personality
+    // MARK: - Staged moves (Done/Undo)
+
+    /// Board state with pending (uncommitted) moves applied.
+    @Published var pendingBoard = BackgammonBoard.initial
+    /// Each pending move paired with the die-slot index it consumed.
+    private var pendingMoves: [(CheckerMove, Int)] = []
+
+    // MARK: - Input mode
+
+    @Published var inputMode: InputMode {
+        didSet { UserDefaults.standard.set(inputMode.rawValue, forKey: UDKey.inputMode) }
+    }
+
+    // MARK: - AI Personality
+
+    /// Current AI skill level in [0, 1].  Published so the UI can reflect it.
     @Published private(set) var aiSkill: Double
+
+    /// When true, `aiSkill` is automatically adjusted each turn based on the
+    /// player's demonstrated move quality (coaching analysis scores).
     @Published var isAdaptiveAI: Bool
 
-    // Input mode
-    @Published var inputMode: InputMode {
-        didSet { UserDefaults.standard.set(inputMode.rawValue, forKey: "bg.inputMode") }
-    }
-
-    private var playerRating: Double {
-        didSet { UserDefaults.standard.set(playerRating, forKey: "bg.playerRating") }
-    }
-    private var fixedAISkill: Double {
-        didSet { UserDefaults.standard.set(fixedAISkill, forKey: "bg.fixedAISkill") }
-    }
+    // Smoothed estimate of the player's strength (0 = beginner, 1 = expert).
+    // Persisted across sessions so the AI starts calibrated to your history.
+    private var playerRating: Double
     private var adaptiveTurnsAnalyzed: Int = 0
 
-    // Coaching context (snapshot at roll time)
+    // Fixed skill used when adaptive mode is off.
+    private var fixedAISkill: Double
+
+    // UserDefaults keys
+    private enum UDKey {
+        static let playerRating  = "bg.playerRating"
+        static let fixedAISkill  = "bg.fixedAISkill"
+        static let isAdaptiveAI  = "bg.isAdaptiveAI"
+        static let inputMode     = "bg.inputMode"
+    }
+
+    // MARK: - Coaching turn context
+
     private var turnStartBoard = BackgammonBoard.initial
     private var turnDice: [Int] = []
 
-    // MARK: Init
+    // MARK: - Init
 
     init() {
-        let savedRating = UserDefaults.standard.double(forKey: "bg.playerRating")
-        playerRating = savedRating > 0 ? savedRating : 0.35
-        let savedSkill = UserDefaults.standard.double(forKey: "bg.fixedAISkill")
-        fixedAISkill = savedSkill > 0 ? savedSkill : 0.55
-        isAdaptiveAI = UserDefaults.standard.bool(forKey: "bg.adaptiveAI")
-        let modeRaw = UserDefaults.standard.string(forKey: "bg.inputMode") ?? ""
-        inputMode = InputMode(rawValue: modeRaw) ?? .checkerFirst
-        if isAdaptiveAI {
-            aiSkill = GameState.targetAISkill(for: savedRating > 0 ? savedRating : 0.35)
-        } else {
-            aiSkill = fixedAISkill > 0 ? fixedAISkill : 0.55
-        }
+        let ud = UserDefaults.standard
+        let savedRating  = ud.object(forKey: UDKey.playerRating) as? Double ?? 0.50
+        let savedFixed   = ud.object(forKey: UDKey.fixedAISkill) as? Double ?? 0.65
+        let savedAdapt   = ud.object(forKey: UDKey.isAdaptiveAI) as? Bool   ?? true
+        let modeRaw      = ud.string(forKey: UDKey.inputMode) ?? ""
+
+        playerRating  = savedRating
+        fixedAISkill  = savedFixed
+        isAdaptiveAI  = savedAdapt
+        inputMode     = InputMode(rawValue: modeRaw) ?? .checkerFirst
+
+        // Start the first game at the skill appropriate to the player's last known rating.
+        aiSkill = savedAdapt ? Self.targetAISkill(for: savedRating) : savedFixed
     }
 
-    // MARK: Rolling
+    // MARK: - AI Personality API
+
+    /// Returns a human-readable description of the current AI strength.
+    var aiSkillLabel: String { Self.skillLabel(for: aiSkill) }
+
+    /// Returns a human-readable description of the player's rating.
+    var playerRatingLabel: String { Self.skillLabel(for: playerRating) }
+
+    /// The player's smoothed performance rating (0-1), for display in the UI.
+    var playerRatingValue: Double { playerRating }
+
+    /// The number of turns the adaptive model has observed in this session.
+    var adaptiveTurnsCount: Int { adaptiveTurnsAnalyzed }
+
+    /// Sets a fixed difficulty and disables adaptive mode.
+    func setFixedDifficulty(_ skill: Double) {
+        fixedAISkill = min(1.0, max(0.0, skill))
+        isAdaptiveAI = false
+        aiSkill = fixedAISkill
+        UserDefaults.standard.set(fixedAISkill, forKey: UDKey.fixedAISkill)
+        UserDefaults.standard.set(false,        forKey: UDKey.isAdaptiveAI)
+    }
+
+    /// Enables adaptive mode; immediately adjusts skill to match player rating.
+    func enableAdaptiveAI() {
+        isAdaptiveAI = true
+        aiSkill = Self.targetAISkill(for: playerRating)
+        UserDefaults.standard.set(true, forKey: UDKey.isAdaptiveAI)
+    }
+
+    // MARK: - Player Actions
 
     func rollDice() {
-        guard phase == .rolling && currentPlayer == .white else { return }
+        guard case .rolling = phase else { return }
         coachingAnalysis = nil
-        turnStartBoard = board
-        let d1 = Int.random(in: 1...6), d2 = Int.random(in: 1...6)
-        dice = d1 == d2 ? [d1, d1, d1, d1] : [d1, d2]
-        usedDice = Array(repeating: false, count: dice.count)
-        pendingBoard = board
-        pendingMoves = []
-        turnDice = dice
-        clearSelection()
+        turnStartBoard   = board
+        pendingBoard     = board
+        pendingMoves     = []
+        let rolled = BackgammonEngine.rollDice()
+        turnDice = rolled
+        dice = rolled
+        usedDice = Array(repeating: false, count: rolled.count)
+        selectedPoint    = nil
+        selectedDieIndex = nil
+        validDestinations = []
 
-        let moves = BackgammonEngine.generateMoves(board: board, dice: dice, isWhite: true)
-        let hasAny = moves.contains(where: { !$0.moves.isEmpty })
-        if !hasAny {
-            message = "No legal moves!"
+        let moves = BackgammonEngine.generateMoves(
+            board: board, dice: remainingDice, isWhite: currentPlayer == .white)
+
+        if moves.count == 1, moves[0].moves.isEmpty {
+            message = "\(currentPlayer.rawValue) rolled \(diceString()) — no moves available!"
             advanceTurn()
         } else {
             phase = .moving
-            setMovingPrompt()
+            message = inputMode == .diceFirst
+                ? "\(currentPlayer.rawValue) rolled \(diceString()) — select a die"
+                : "\(currentPlayer.rawValue) rolled \(diceString()) — select a checker"
         }
     }
 
-    // MARK: Checker-first input
+    // MARK: - Checker-first input
 
     func selectPoint(_ index: Int) {
-        guard phase == .moving, inputMode == .checkerFirst else { return }
+        guard case .moving = phase, inputMode == .checkerFirst else { return }
+        let isWhite = currentPlayer == .white
 
-        // Tapping a valid destination while a source is selected
-        if let src = selectedPoint, validDestinations.contains(index) {
-            if let dieIdx = dieIndexForMove(from: src, to: index, board: pendingBoard) {
-                executeMove(CheckerMove(from: src, to: index), dieIndex: dieIdx)
-            }
+        // Tapping a valid destination executes the staged move
+        if let from = selectedPoint, validDestinations.contains(index) {
+            executeMove(CheckerMove(from: from, to: index))
             return
         }
 
-        // Select a new source
-        let b = pendingBoard
-        let hasWhiteChecker: Bool
+        // Select a checker owned by the current player (from pendingBoard)
+        let hasChecker: Bool
         if index == 24 {
-            hasWhiteChecker = b.whiteBar > 0
+            hasChecker = isWhite ? pendingBoard.whiteBar > 0 : pendingBoard.blackBar > 0
         } else {
-            hasWhiteChecker = index < 24 && b.points[index] > 0
+            hasChecker = isWhite ? pendingBoard.points[index] > 0 : pendingBoard.points[index] < 0
         }
 
-        if hasWhiteChecker {
-            selectedPoint = index
-            validDestinations = computeDestinations(from: index, board: b,
-                                                    diceValues: remainingDiceValues())
-            message = validDestinations.isEmpty ? "No legal moves from here" : "Tap a highlighted point"
-        } else {
-            clearSelection()
-            setMovingPrompt()
+        guard hasChecker else {
+            selectedPoint = nil
+            validDestinations = []
+            return
         }
+
+        selectedPoint = index
+        validDestinations = computeDestinations(from: index)
     }
 
-    // MARK: Dice-first input
+    // MARK: - Dice-first input
 
-    func selectDie(_ dieIndex: Int) {
-        guard phase == .moving, inputMode == .diceFirst else { return }
-        guard dieIndex < usedDice.count, !usedDice[dieIndex] else { return }
+    func selectDie(_ i: Int) {
+        guard case .moving = phase, inputMode == .diceFirst else { return }
+        guard i < usedDice.count, !usedDice[i] else { return }
 
-        if selectedDieIndex == dieIndex {
+        if selectedDieIndex == i {
             selectedDieIndex = nil
             validDestinations = []
-            setMovingPrompt()
-        } else {
-            selectedDieIndex = dieIndex
-            validDestinations = computeDestsForDie(die: dice[dieIndex], board: pendingBoard)
-            message = validDestinations.isEmpty ? "No moves with this die" : "Tap a point to move there"
+            message = "Select a die, then tap a point"
+            return
         }
+
+        selectedDieIndex = i
+        let die = dice[i]
+        let singles = BackgammonEngine.legalSingleMoves(
+            board: pendingBoard, die: die, isWhite: currentPlayer == .white)
+        validDestinations = Set(singles.map { $0.to })
+        message = validDestinations.isEmpty ? "No moves with this die" : "Tap a destination"
     }
 
-    func selectDestinationWithDie(_ destIndex: Int) {
-        guard phase == .moving, inputMode == .diceFirst else { return }
+    func selectDestWithDie(_ destIndex: Int) {
+        guard case .moving = phase, inputMode == .diceFirst else { return }
 
-        if let dieIdx = selectedDieIndex {
-            // Use the selected die
-            guard validDestinations.contains(destIndex) else { return }
-            if let src = BackgammonEngine.findSourceForDest(board: pendingBoard, dest: destIndex,
-                                                            die: dice[dieIdx], isWhite: true) {
-                executeMove(CheckerMove(from: src, to: destIndex), dieIndex: dieIdx)
-                selectedDieIndex = nil
-                validDestinations = []
-            }
+        let dieIdx: Int
+        let die: Int
+        if let sel = selectedDieIndex {
+            dieIdx = sel
+            die = dice[sel]
         } else {
             // Auto-select: try each remaining die
-            let remaining = remainingDiceIndexed()
-            for (dieIdx, die) in remaining {
-                if let src = BackgammonEngine.findSourceForDest(board: pendingBoard, dest: destIndex,
-                                                                die: die, isWhite: true) {
-                    executeMove(CheckerMove(from: src, to: destIndex), dieIndex: dieIdx)
-                    return
-                }
-            }
+            guard let found = remainingDice.enumerated().first(where: { _, d in
+                BackgammonEngine.legalSingleMoves(
+                    board: pendingBoard, die: d, isWhite: currentPlayer == .white
+                ).contains(where: { $0.to == destIndex })
+            }) else { return }
+            die = found.element
+            // find its slot in the usedDice array
+            guard let slot = zip(dice, usedDice).enumerated()
+                .first(where: { !$0.element.1 && $0.element.0 == die })?.offset
+            else { return }
+            dieIdx = slot
         }
+
+        // Find which checker can reach destIndex with this die
+        let singles = BackgammonEngine.legalSingleMoves(
+            board: pendingBoard, die: die, isWhite: currentPlayer == .white)
+        guard let match = singles.first(where: { $0.to == destIndex }) else { return }
+
+        executeMove(CheckerMove(from: match.from, to: destIndex), forcedDieIndex: dieIdx)
+        selectedDieIndex = nil
     }
 
-    // MARK: Unified tap dispatch
+    // MARK: - Move execution (staged — applies to pendingBoard)
 
-    func tapPoint(_ index: Int) {
-        guard phase == .moving else { return }
-        if inputMode == .checkerFirst {
-            selectPoint(index)
+    func executeMove(_ move: CheckerMove, forcedDieIndex: Int? = nil) {
+        guard case .moving = phase else { return }
+        let isWhite = currentPlayer == .white
+
+        let dieIdx: Int
+        if let forced = forcedDieIndex {
+            dieIdx = forced
         } else {
-            selectDestinationWithDie(index)
+            guard let found = findDie(for: move, isWhite: isWhite) else { return }
+            dieIdx = found
         }
-    }
 
-    // MARK: Execute a single checker move (internal)
+        pendingBoard = BackgammonEngine.applyMove(move, to: pendingBoard, isWhite: isWhite)
+        pendingMoves.append((move, dieIdx))
+        usedDice[dieIdx] = true
+        selectedPoint    = nil
+        selectedDieIndex = nil
+        validDestinations = []
 
-    private func executeMove(_ move: CheckerMove, dieIndex: Int) {
-        pendingBoard = BackgammonEngine.applyMove(move, to: pendingBoard, isWhite: true)
-        pendingMoves.append((move, dieIndex))
-        usedDice[dieIndex] = true
+        // Check win on staged board — game over is unambiguous even before commit
+        if let result = BackgammonEngine.gameResult(pendingBoard) {
+            board = pendingBoard
+            pendingMoves = []
+            gameResult = result
+            phase = .gameOver(result)
+            message = result.description
+            return
+        }
 
-        clearSelection()
-
-        checkGameOver(board: pendingBoard)
-        if phase == .gameOver { return }
-
-        let rem = remainingDiceValues()
+        let rem = remainingDice
         if rem.isEmpty {
-            message = "Tap Done to confirm your move"
+            message = "Tap Done to end your turn"
         } else {
-            let moreLegal = BackgammonEngine.generateMoves(board: pendingBoard, dice: rem, isWhite: true)
-                .contains(where: { !$0.moves.isEmpty })
-            if moreLegal {
-                setMovingPrompt()
+            let moreMoves = BackgammonEngine.generateMoves(board: pendingBoard, dice: rem, isWhite: isWhite)
+            if moreMoves.count == 1, moreMoves[0].moves.isEmpty {
+                message = "No more moves — tap Done"
             } else {
-                message = "No more legal moves — tap Done"
+                message = inputMode == .diceFirst
+                    ? "Select a die, then tap a point (\(rem.count) left)"
+                    : "Select a checker (\(rem.count) die\(rem.count == 1 ? "" : "s") left)"
             }
         }
     }
 
-    // MARK: Done / Undo
+    // MARK: - Done / Undo
 
     func commitMoves() {
-        guard phase == .moving else { return }
+        guard case .moving = phase else { return }
         board = pendingBoard
         pendingMoves = []
         advanceTurn()
     }
 
     func undoLastMove() {
-        guard phase == .moving, !pendingMoves.isEmpty else { return }
+        guard case .moving = phase, !pendingMoves.isEmpty else { return }
+        let (_, dieIdx) = pendingMoves.removeLast()
+        usedDice[dieIdx] = false
 
-        // Pop the last move
-        let (_, dieIndex) = pendingMoves.removeLast()
-        usedDice[dieIndex] = false
-
-        // Rebuild pending board from committed board + remaining pending moves
+        // Rebuild pending board by replaying the remaining staged moves from scratch
         var rebuilt = board
         for (mv, _) in pendingMoves {
-            rebuilt = BackgammonEngine.applyMove(mv, to: rebuilt, isWhite: true)
+            rebuilt = BackgammonEngine.applyMove(mv, to: rebuilt, isWhite: currentPlayer == .white)
         }
         pendingBoard = rebuilt
+        selectedPoint    = nil
+        selectedDieIndex = nil
+        validDestinations = []
 
-        clearSelection()
-        setMovingPrompt()
-    }
-
-    // MARK: AI Turn
-
-    func triggerAITurn() {
-        guard phase == .aiTurn else { return }
-        let capturedSkill = aiSkill
-        let capturedBoard = board
-        Task {
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            let d1 = Int.random(in: 1...6), d2 = Int.random(in: 1...6)
-            let aiDice = d1 == d2 ? [d1, d1, d1, d1] : [d1, d2]
-            let seq = await Task.detached(priority: .userInitiated) {
-                BackgammonEngine.chooseBestMove(board: capturedBoard, dice: aiDice,
-                                               isWhite: false, skill: capturedSkill)
-            }.value
-            let finalBoard = BackgammonEngine.applySequence(seq, to: capturedBoard, isWhite: false)
-            self.board = finalBoard
-            self.pendingBoard = finalBoard
-            self.checkGameOver(board: finalBoard)
-            if self.phase != .gameOver {
-                self.currentPlayer = .white
-                self.phase = .rolling
-                self.message = "Your turn — roll the dice!"
-            }
+        let rem = remainingDice
+        if rem.isEmpty {
+            message = "Tap Done to end your turn"
+        } else {
+            message = inputMode == .diceFirst
+                ? "Select a die, then tap a point (\(rem.count) left)"
+                : "Select a checker (\(rem.count) die\(rem.count == 1 ? "" : "s") left)"
         }
     }
 
-    // MARK: Advance turn (after white commits)
+    var canCommit: Bool {
+        guard case .moving = phase else { return false }
+        if remainingDice.isEmpty { return true }
+        let moreMoves = BackgammonEngine.generateMoves(
+            board: pendingBoard, dice: remainingDice, isWhite: currentPlayer == .white)
+        return moreMoves.count == 1 && moreMoves[0].moves.isEmpty
+    }
+
+    var canUndo: Bool {
+        guard case .moving = phase else { return false }
+        return !pendingMoves.isEmpty
+    }
+
+    // MARK: - AI Turn
+
+    func triggerAITurn() {
+        guard currentPlayer == .black else { return }
+        phase = .aiTurn
+        message = "Black is thinking…"
+
+        // Capture skill so adaptive updates mid-Task don't affect this turn's move.
+        let capturedSkill = aiSkill
+
+        Task {
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 s UX pause before showing roll
+
+            let rolled = BackgammonEngine.rollDice()
+            self.dice = rolled
+            self.usedDice = Array(repeating: false, count: rolled.count)
+            self.message = "Black rolled \(self.diceString()) — \(capturedSkill < 0.35 ? "plays…" : "thinking…")"
+
+            // Snapshot board so the background task captures a value type, not self.
+            let boardSnapshot = self.board
+
+            // Run move selection on a background thread.
+            let best = await Task.detached(priority: .userInitiated) {
+                BackgammonEngine.chooseBestMove(board: boardSnapshot, dice: rolled,
+                                               isWhite: false, skill: capturedSkill)
+            }.value
+
+            self.message = "Black plays"
+            try? await Task.sleep(nanoseconds: 300_000_000)
+
+            for move in best.moves {
+                self.board = BackgammonEngine.applyMove(move, to: self.board, isWhite: false)
+                try? await Task.sleep(nanoseconds: 420_000_000) // Animate each move
+            }
+
+            if let result = BackgammonEngine.gameResult(self.board) {
+                self.gameResult = result
+                self.phase = .gameOver(result)
+                self.message = result.description
+                return
+            }
+
+            self.advanceTurn()
+        }
+    }
+
+    // MARK: - Helpers
 
     private func advanceTurn() {
-        // Kick off coaching analysis in background
-        if currentPlayer == .white {
-            let startBoard = turnStartBoard
-            let endBoard   = board
-            let usedArr    = turnDice
+        if currentPlayer == .white && board != turnStartBoard {
+            let startBoard  = turnStartBoard
+            let endBoard    = board
+            let usedDiceArr = turnDice
             Task {
                 let analysis = await Task.detached(priority: .userInitiated) {
-                    BackgammonEngine.analyzePlayerTurn(boardBefore: startBoard,
-                                                       boardAfter: endBoard,
-                                                       dice: usedArr, isWhite: true)
+                    BackgammonEngine.analyzePlayerTurn(
+                        boardBefore: startBoard,
+                        boardAfter:  endBoard,
+                        dice:        usedDiceArr,
+                        isWhite:     true
+                    )
                 }.value
                 self.coachingAnalysis = analysis
                 self.applyAdaptiveUpdate(from: analysis)
@@ -304,86 +405,104 @@ final class GameState: ObservableObject {
         currentPlayer = currentPlayer == .white ? .black : .white
         dice = []
         usedDice = []
-        clearSelection()
+        selectedPoint    = nil
+        selectedDieIndex = nil
+        validDestinations = []
         pendingMoves = []
 
         if currentPlayer == .black {
             phase = .aiTurn
-            message = "AI is thinking…"
             triggerAITurn()
         } else {
             phase = .rolling
-            message = "Your turn — roll the dice!"
+            message = "White's turn — tap Roll"
         }
     }
 
-    // MARK: Game over
+    /// Updates the player rating and AI skill from a completed coaching analysis.
+    private func applyAdaptiveUpdate(from analysis: BackgammonEngine.MoveAnalysis) {
+        guard isAdaptiveAI else { return }
 
-    private func checkGameOver(board: BackgammonBoard) {
-        if board.whiteOff == 15 {
-            let gammon = board.blackOff == 0
-            let bg = gammon && (board.blackBar > 0 || (0..<6).contains(where: { board.points[$0] < 0 }))
-            gameResult = .win(isGammon: gammon, isBackgammon: bg)
-            phase = .gameOver
-            message = bg ? "Backgammon! You win!" : gammon ? "Gammon! You win!" : "You win!"
-        } else if board.blackOff == 15 {
-            let gammon = board.whiteOff == 0
-            let bg = gammon && (board.whiteBar > 0 || (18..<24).contains(where: { board.points[$0] > 0 }))
-            gameResult = .loss(isGammon: gammon, isBackgammon: bg)
-            phase = .gameOver
-            message = bg ? "Backgammon! AI wins!" : gammon ? "Gammon! AI wins!" : "AI wins!"
-        }
+        // Exponential moving average with a decaying learning rate:
+        // fast early in a session, stabilises over time.
+        let alpha = max(0.05, 0.30 / (1.0 + Double(adaptiveTurnsAnalyzed) * 0.04))
+        playerRating = (1.0 - alpha) * playerRating + alpha * analysis.quality.performanceScore
+        adaptiveTurnsAnalyzed += 1
+
+        // Smoothly converge AI skill toward the target (avoids jarring mid-game jumps).
+        let target = Self.targetAISkill(for: playerRating)
+        aiSkill = 0.80 * aiSkill + 0.20 * target
+
+        // Persist updated player rating.
+        UserDefaults.standard.set(playerRating, forKey: UDKey.playerRating)
     }
 
-    // MARK: New game
+    private var remainingDice: [Int] {
+        zip(dice, usedDice).compactMap { (die, used) in used ? nil : die }
+    }
+
+    private func findDie(for move: CheckerMove, isWhite: Bool) -> Int? {
+        let dieValue: Int
+        if move.from == 24 {
+            dieValue = isWhite ? (24 - move.to) : (move.to + 1)
+        } else if move.to == 24 {
+            // Bear-off: prefer exact match, then smallest overshoot
+            let distance = isWhite ? (move.from + 1) : (24 - move.from)
+            let rem = zip(dice, usedDice).enumerated().filter { !$0.element.1 }.map { ($0.offset, $0.element.0) }
+            if let exact = rem.first(where: { $0.1 == distance }) { return exact.0 }
+            if let over  = rem.filter({ $0.1 > distance }).min(by: { $0.1 < $1.1 }) { return over.0 }
+            return nil
+        } else {
+            dieValue = abs(move.to - move.from)
+        }
+        return zip(dice, usedDice).enumerated()
+            .first(where: { !$0.element.1 && $0.element.0 == dieValue })?.offset
+    }
+
+    private func computeDestinations(from source: Int) -> Set<Int> {
+        let isWhite = currentPlayer == .white
+        var dests = Set<Int>()
+        var tried = Set<Int>()
+
+        for die in remainingDice {
+            guard !tried.contains(die) else { continue }
+            tried.insert(die)
+            let singles = BackgammonEngine.legalSingleMoves(board: pendingBoard, die: die, isWhite: isWhite)
+            for m in singles where m.from == source {
+                dests.insert(m.to)
+            }
+        }
+        return dests
+    }
+
+    private func diceString() -> String {
+        dice.map(String.init).joined(separator: " & ")
+    }
 
     func newGame() {
-        board = BackgammonBoard.initial
-        pendingBoard = BackgammonBoard.initial
+        board = .initial
+        pendingBoard = .initial
         pendingMoves = []
         currentPlayer = .white
         phase = .rolling
         dice = []
         usedDice = []
-        clearSelection()
-        message = "Roll to start!"
+        selectedPoint    = nil
+        selectedDieIndex = nil
+        validDestinations = []
         gameResult = nil
         coachingAnalysis = nil
+        turnStartBoard = .initial
+        turnDice = []
+        message = "White's turn — tap Roll"
+
         adaptiveTurnsAnalyzed = 0
-        aiSkill = isAdaptiveAI ? GameState.targetAISkill(for: playerRating) : fixedAISkill
+        aiSkill = isAdaptiveAI ? Self.targetAISkill(for: playerRating) : fixedAISkill
     }
 
-    // MARK: Difficulty settings
+    // MARK: - Static helpers
 
-    func setFixedDifficulty(_ skill: Double) {
-        fixedAISkill = skill
-        isAdaptiveAI = false
-        aiSkill = skill
-        UserDefaults.standard.set(false, forKey: "bg.adaptiveAI")
-    }
-
-    func enableAdaptiveAI() {
-        isAdaptiveAI = true
-        UserDefaults.standard.set(true, forKey: "bg.adaptiveAI")
-        aiSkill = GameState.targetAISkill(for: playerRating)
-    }
-
-    // MARK: Adaptive update
-
-    private func applyAdaptiveUpdate(from analysis: BackgammonEngine.MoveAnalysis) {
-        guard isAdaptiveAI else { return }
-        adaptiveTurnsAnalyzed += 1
-        let alpha = max(0.05, 0.30 / (1.0 + Double(adaptiveTurnsAnalyzed) * 0.04))
-        playerRating = (1 - alpha) * playerRating + alpha * analysis.quality.performanceScore
-        playerRating = max(0, min(1, playerRating))
-        let target = GameState.targetAISkill(for: playerRating)
-        aiSkill = 0.80 * aiSkill + 0.20 * target
-    }
-
-    static func targetAISkill(for playerRating: Double) -> Double {
-        min(1.0, max(0.15, playerRating + 0.15))
-    }
-
+    /// Human-readable label for a skill value.
     static func skillLabel(for skill: Double) -> String {
         switch skill {
         case ..<0.20: return "Novice"
@@ -395,68 +514,25 @@ final class GameState: ObservableObject {
         }
     }
 
-    var aiSkillLabel: String       { GameState.skillLabel(for: aiSkill) }
-    var playerRatingLabel: String  { GameState.skillLabel(for: playerRating) }
-    var playerRatingValue: Double  { playerRating }
-    var adaptiveTurnsCount: Int    { adaptiveTurnsAnalyzed }
-
-    // MARK: Commit gating
-
-    var canCommit: Bool {
-        guard phase == .moving else { return false }
-        let rem = remainingDiceValues()
-        if rem.isEmpty { return true }
-        // Allow commit only if no legal moves remain with the remaining dice
-        let moreLegal = BackgammonEngine.generateMoves(board: pendingBoard, dice: rem, isWhite: true)
-            .contains(where: { !$0.moves.isEmpty })
-        return !moreLegal
+    /// AI skill target: always ~15 percentage points above the player's rating,
+    /// so the AI stays challenging without being overwhelming.
+    static func targetAISkill(for playerRating: Double) -> Double {
+        min(1.0, max(0.15, playerRating + 0.15))
     }
+}
 
-    var canUndo: Bool {
-        phase == .moving && !pendingMoves.isEmpty
-    }
+// MARK: - MoveQuality performance score
 
-    // MARK: Private helpers
-
-    func remainingDiceValues() -> [Int] {
-        (0..<dice.count).filter { !usedDice[$0] }.map { dice[$0] }
-    }
-
-    private func remainingDiceIndexed() -> [(Int, Int)] {
-        (0..<dice.count).filter { !usedDice[$0] }.map { ($0, dice[$0]) }
-    }
-
-    private func computeDestinations(from point: Int, board: BackgammonBoard,
-                                     diceValues: [Int]) -> Set<Int> {
-        var dests = Set<Int>()
-        for die in Set(diceValues) {
-            let singles = BackgammonEngine.legalSingleMoves(board: board, die: die, isWhite: true)
-            for mv in singles where mv.from == point { dests.insert(mv.to) }
+extension BackgammonEngine.MoveQuality {
+    /// Maps move quality to a [0, 1] performance score for adaptive rating updates.
+    var performanceScore: Double {
+        switch self {
+        case .optimal:    return 1.00
+        case .excellent:  return 0.82
+        case .good:       return 0.62
+        case .inaccuracy: return 0.40
+        case .mistake:    return 0.20
+        case .blunder:    return 0.00
         }
-        return dests
-    }
-
-    private func computeDestsForDie(die: Int, board: BackgammonBoard) -> Set<Int> {
-        Set(BackgammonEngine.legalSingleMoves(board: board, die: die, isWhite: true).map { $0.to })
-    }
-
-    private func dieIndexForMove(from: Int, to: Int, board: BackgammonBoard) -> Int? {
-        for (i, die) in dice.enumerated() where !usedDice[i] {
-            let singles = BackgammonEngine.legalSingleMoves(board: board, die: die, isWhite: true)
-            if singles.contains(where: { $0.from == from && $0.to == to }) { return i }
-        }
-        return nil
-    }
-
-    private func clearSelection() {
-        selectedPoint    = nil
-        selectedDieIndex = nil
-        validDestinations = []
-    }
-
-    private func setMovingPrompt() {
-        message = inputMode == .diceFirst
-            ? "Select a die, then tap a point"
-            : "Select a checker to move"
     }
 }
