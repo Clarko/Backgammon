@@ -14,6 +14,8 @@
 		BF001005000000000000001A /* BoardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF002005000000000000001A /* BoardView.swift */; };
 		BF001006000000000000001A /* DiceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF002006000000000000001A /* DiceView.swift */; };
 		BF001007000000000000001A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BF002007000000000000001A /* Assets.xcassets */; };
+		BF001008000000000000001A /* CoachingSheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF002009000000000000001A /* CoachingSheetView.swift */; };
+		BF001009000000000000001A /* DifficultySheetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF00200B000000000000001A /* DifficultySheetView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +28,8 @@
 		BF002006000000000000001A /* DiceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiceView.swift; sourceTree = "<group>"; };
 		BF002007000000000000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BF002008000000000000001A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BF002009000000000000001A /* CoachingSheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachingSheetView.swift; sourceTree = "<group>"; };
+		BF00200B000000000000001A /* DifficultySheetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DifficultySheetView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -74,6 +78,8 @@
 			children = (
 				BF002005000000000000001A /* BoardView.swift */,
 				BF002006000000000000001A /* DiceView.swift */,
+				BF002009000000000000001A /* CoachingSheetView.swift */,
+				BF00200B000000000000001A /* DifficultySheetView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -161,6 +167,8 @@
 				BF001004000000000000001A /* GameState.swift in Sources */,
 				BF001005000000000000001A /* BoardView.swift in Sources */,
 				BF001006000000000000001A /* DiceView.swift in Sources */,
+				BF001008000000000000001A /* CoachingSheetView.swift in Sources */,
+				BF001009000000000000001A /* DifficultySheetView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
