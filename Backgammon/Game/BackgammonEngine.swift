@@ -68,7 +68,7 @@ struct MoveSequence: Hashable {
 
 enum Player: String { case white = "White"; case black = "Black" }
 
-enum GameResult {
+enum GameResult: Equatable {
     case normal(winner: Player)
     case gammon(winner: Player)
     case backgammon(winner: Player)

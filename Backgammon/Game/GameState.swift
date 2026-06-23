@@ -4,7 +4,7 @@
 import Foundation
 import Combine
 
-enum GamePhase {
+enum GamePhase: Equatable {
     case initial          // Waiting for first roll to determine who goes first
     case rolling          // Player needs to roll
     case moving           // Player is selecting / making moves

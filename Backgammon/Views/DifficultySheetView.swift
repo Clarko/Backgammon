@@ -43,7 +43,7 @@ struct DifficultySheetView: View {
     private var inputModeSection: some View {
         Section {
             Picker("Control Scheme", selection: $gameState.inputMode) {
-                ForEach(GameState.InputMode.allCases, id: \.self) { mode in
+                ForEach(InputMode.allCases, id: \.self) { mode in
                     Text(mode.label).tag(mode)
                 }
             }
